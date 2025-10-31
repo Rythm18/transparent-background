@@ -5,6 +5,10 @@ import yaml
 import torch
 import hashlib
 import argparse
+import mimetypes
+import tempfile
+from urllib.parse import urlparse
+from io import BytesIO
 
 import albumentations as A
 from albumentations.core.transforms_interface import ImageOnlyTransform
@@ -14,6 +18,11 @@ import numpy as np
 from PIL import Image
 from threading import Thread
 from easydict import EasyDict
+
+try:
+    import requests  # optional, used for URL inputs
+except Exception:  # pragma: no cover - requests added as dependency, but keep safe import
+    requests = None
 
 VID_EXTS = ('mp4', 'avi', 'h264', 'mkv', 'mov', 'flv', 'wmv', 'webm', 'ts', 'm4v', 'vob', '3gp', '3g2', 'rm', 'rmvb', 'ogv', 'ogg', 'drc', 'gif', 'gifv', 'mng', 'avi', 'mov', 'qt', 'wmv', 'yuv', 'rm', 'rmvb', 'asf', 'amv', 'mp4', 'm4p', 'm4v', 'mpg', 'mp2', 'mpeg', 'mpe', 'mpv', 'mpg', 'mpeg', 'm2v', 'm4v', 'svi', '3gp', '3g2', 'mxf', 'roq', 'nsv', 'flv', 'f4v', 'f4p', 'f4a', 'f4b')
 IMG_EXTS = ('jpg', 'jpeg', 'bmp', 'png', 'ppm', 'pgm', 'pbm', 'pnm', 'webp', 'sr', 'ras', 'tiff', 'tif', 'exr', 'hdr', 'pic', 'dib', 'jpe', 'jp2', 'j2k', 'jpf', 'jpx', 'jpm', 'mj2', 'jxr', 'hdp', 'wdp', 'cur', 'ico', 'ani', 'icns', 'bpg', 'jp2', 'j2k', 'jpf', 'jpx', 'jpm', 'mj2', 'jxr', 'hdp', 'wdp', 'cur', 'ico', 'ani', 'icns', 'bpg')
@@ -259,3 +268,136 @@ class WebcamLoader:
 
     def __len__(self):
         return 0
+
+# -------------- URL helpers and loaders --------------
+
+def is_url(s: str) -> bool:
+    return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
+
+
+def get_format_from_url(url: str, content_type: str = None) -> str:
+    """Infer media type from URL or content-type.
+    Returns 'Image', 'Video', or '' if unknown.
+    """
+    try:
+        path = urlparse(url).path
+    except Exception:
+        path = url
+    lower = path.lower()
+    if any(lower.endswith(f".{ext}") for ext in IMG_EXTS):
+        return 'Image'
+    if any(lower.endswith(f".{ext}") for ext in VID_EXTS):
+        return 'Video'
+    if content_type:
+        if content_type.startswith('image/'):
+            return 'Image'
+        if content_type.startswith('video/'):
+            return 'Video'
+    return ''
+
+
+def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
+    assert requests is not None, "requests is required for URL input support"
+    resp = requests.get(url, stream=True, timeout=timeout)
+    resp.raise_for_status()
+    img = Image.open(BytesIO(resp.content)).convert('RGB')
+    return img
+
+
+def _infer_suffix(url: str, content_type: str = None) -> str:
+    # try url path
+    try:
+        path = urlparse(url).path
+    except Exception:
+        path = url
+    base, ext = os.path.splitext(path)
+    if ext and len(ext) <= 5:
+        return ext
+    # try content type
+    if content_type:
+        guess = mimetypes.guess_extension(content_type.split(';')[0].strip())
+        if guess:
+            return guess
+    return ''
+
+
+def download_url_to_tempfile(url: str, suffix: str = None, timeout: float = 60.0) -> str:
+    assert requests is not None, "requests is required for URL input support"
+    head_ct = None
+    try:
+        h = requests.head(url, timeout=min(10.0, timeout))
+        if 'content-type' in h.headers:
+            head_ct = h.headers['content-type']
+    except Exception:
+        head_ct = None
+    if suffix is None:
+        suffix = _infer_suffix(url, head_ct)
+    # ensure suffix begins with '.' if provided and not empty
+    if suffix and not suffix.startswith('.'):
+        suffix = '.' + suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or None) as tf:
+        temp_path = tf.name
+    with requests.get(url, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        with open(temp_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    return temp_path
+
+
+class URLImageLoader:
+    def __init__(self, url: str):
+        self.url = url
+        # Pre-fetch to raise errors early and to know name
+        self.image = fetch_image_from_url(url)
+        try:
+            path = urlparse(url).path
+        except Exception:
+            path = url
+        name = os.path.basename(path)
+        if name == '' or name is None:
+            name = 'remote.jpg'
+        self.name = name
+        self.size = 1
+
+    def __iter__(self):
+        self.index = 0
+        return self
+
+    def __next__(self):
+        if self.index >= self.size:
+            raise StopIteration
+        self.index += 1
+        return self.image, self.name
+
+    def __len__(self):
+        return self.size
+
+
+class URLVideoLoader:
+    def __init__(self, url: str):
+        # Download to a temp file and delegate
+        temp_path = download_url_to_tempfile(url)
+        self._temp_path = temp_path
+        self._inner = VideoLoader(temp_path)
+        self.size = len(self._inner)
+
+    def __iter__(self):
+        self._iter = iter(self._inner)
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._iter)
+        except StopIteration:
+            # cleanup temp file
+            try:
+                if os.path.isfile(self._temp_path):
+                    os.remove(self._temp_path)
+            except Exception:
+                pass
+            raise
+
+    def __len__(self):
+        return self.size
