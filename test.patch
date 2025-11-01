@@ -31,10 +31,10 @@ index 0000000..34b2302
 +    assert True
 +diff --git a/tests/new/test_remote_input_utils.py b/tests/new/test_remote_input_utils.py
 new file mode 100644
-index 0000000..c093d8d
+index 0000000..def1234
 --- /dev/null
 +++ b/tests/new/test_remote_input_utils.py
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,314 @@
 +import os
 +import threading
 +import socket
@@ -45,7 +45,6 @@ index 0000000..c093d8d
 +
 +import pytest
 +import requests
-+import numpy as np
 +
 +from transparent_background.utils import is_url
 +
@@ -119,13 +118,13 @@ index 0000000..c093d8d
 +        base_url = f"http://{host}:{port}/"
 +        url = urljoin(base_url, image_name)
 +
-+    URLImageLoader = getattr(tbu, "URLImageLoader", None)
-+    assert URLImageLoader is not None, "URLImageLoader not found"
-+    loader = URLImageLoader(url)
-+    assert len(loader) == 1
-+    img, name = next(iter(loader))
-+    assert name.endswith(image_name)
-+    assert hasattr(img, "size") and img.size[0] > 0 and img.size[1] > 0
++        URLImageLoader = getattr(tbu, "URLImageLoader", None)
++        assert URLImageLoader is not None, "URLImageLoader not found"
++        loader = URLImageLoader(url)
++        assert len(loader) == 1
++        img, name = next(iter(loader))
++        assert name.endswith(image_name)
++        assert hasattr(img, "size") and img.size[0] > 0 and img.size[1] > 0
 +
 +
 +def test_fetch_and_download_404_raises():
@@ -162,7 +161,7 @@ index 0000000..c093d8d
 +                # Return the image unchanged
 +                if isinstance(img, PILImage.Image):
 +                    return img
-+                return PILImage.fromarray(np.array(img))
++                return img
 +
 +        import transparent_background.Remover as rem_mod
 +        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
@@ -219,7 +218,7 @@ index 0000000..c093d8d
 +            def process(self, img, type="rgba", threshold=None, reverse=False):
 +                if isinstance(img, PILImage.Image):
 +                    return img
-+                return PILImage.fromarray(np.array(img))
++                return img
 +        import transparent_background.Remover as rem_mod
 +        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 +
@@ -319,7 +318,11 @@ index 0000000..c093d8d
 +        def release(self):
 +            return True
 +    monkeypatch.setattr(rem_mod.cv2, "VideoWriter", FakeWriter)
-+    monkeypatch.setattr(rem_mod.cv2, "cvtColor", lambda arr, code: np.zeros((64,64,3), dtype=np.uint8))
++    monkeypatch.setattr(rem_mod.cv2, "cvtColor", lambda arr, code: arr)
++
++    # Avoid numpy dependency inside entry_point
++    import types as _types
++    monkeypatch.setattr(rem_mod, "np", _types.SimpleNamespace(array=lambda x: x))
 +
 +    # Run with cwd as tmp_path, no dest provided
 +    monkeypatch.chdir(str(tmp_path))

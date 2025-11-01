@@ -8,7 +8,6 @@ import shutil
 
 import pytest
 import requests
-import numpy as np
 
 from transparent_background.utils import is_url
 
@@ -125,7 +124,7 @@ def test_entry_point_image_url_writes_output(tmp_path, monkeypatch):
                 # Return the image unchanged
                 if isinstance(img, PILImage.Image):
                     return img
-                return PILImage.fromarray(np.array(img))
+                return img
 
         import transparent_background.Remover as rem_mod
         monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
@@ -182,7 +181,7 @@ def test_entry_point_image_url_no_ext_content_type_and_default_dest(tmp_path, mo
             def process(self, img, type="rgba", threshold=None, reverse=False):
                 if isinstance(img, PILImage.Image):
                     return img
-                return PILImage.fromarray(np.array(img))
+                return img
         import transparent_background.Remover as rem_mod
         monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 
@@ -282,7 +281,11 @@ def test_entry_point_video_url_writes_output_and_cleans_temp(tmp_path, monkeypat
         def release(self):
             return True
     monkeypatch.setattr(rem_mod.cv2, "VideoWriter", FakeWriter)
-    monkeypatch.setattr(rem_mod.cv2, "cvtColor", lambda arr, code: np.zeros((64,64,3), dtype=np.uint8))
+    monkeypatch.setattr(rem_mod.cv2, "cvtColor", lambda arr, code: arr)
+
+    # Avoid numpy dependency inside entry_point
+    import types as _types
+    monkeypatch.setattr(rem_mod, "np", _types.SimpleNamespace(array=lambda x: x))
 
     # Run with cwd as tmp_path, no dest provided
     monkeypatch.chdir(str(tmp_path))
