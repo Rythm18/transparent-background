@@ -31,10 +31,10 @@ index 0000000..34b2302
 +    assert True
 +diff --git a/tests/new/test_remote_input_utils.py b/tests/new/test_remote_input_utils.py
 new file mode 100644
-index 0000000..abcd123
+index 0000000..b2e7a6c
 --- /dev/null
 +++ b/tests/new/test_remote_input_utils.py
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,180 @@
 +import os
 +import threading
 +import socket
@@ -109,3 +109,107 @@ index 0000000..abcd123
 +        fmt_fn = getattr(tbu, "get_format_from_url", None)
 +        assert callable(fmt_fn), "get_format_from_url not found"
 +        assert fmt_fn(url, content_type="image/jpeg") == "Image"
++
++
++def test_urlimageloader_len_and_name():
++    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
++    image_name = "aeroplane.jpg"
++    with run_http_server(samples_dir) as srv:
++        host, port = srv.server_address
++        base_url = f"http://{host}:{port}/"
++        url = urljoin(base_url, image_name)
++
++        URLImageLoader = getattr(tbu, "URLImageLoader", None)
++        assert URLImageLoader is not None, "URLImageLoader not found"
++        loader = URLImageLoader(url)
++        assert len(loader) == 1
++        img, name = next(iter(loader))
++        assert name.endswith(image_name)
++        assert hasattr(img, "size") and img.size[0] > 0 and img.size[1] > 0
++
++
++def test_fetch_and_download_404_raises():
++    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
++    with run_http_server(samples_dir) as srv:
++        host, port = srv.server_address
++        base_url = f"http://{host}:{port}/"
++        bad_url = urljoin(base_url, "no_such_file.jpg")
++
++        fetch_fn = getattr(tbu, "fetch_image_from_url", None)
++        dl_fn = getattr(tbu, "download_url_to_tempfile", None)
++        assert callable(fetch_fn) and callable(dl_fn)
++
++        import requests
++        with pytest.raises(requests.HTTPError):
++            fetch_fn(bad_url, timeout=5.0)
++        with pytest.raises(requests.HTTPError):
++            dl_fn(bad_url, timeout=5.0)
++
++
++def test_entry_point_image_url_writes_output(tmp_path, monkeypatch):
++    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
++    image_name = "aeroplane.jpg"
++    with run_http_server(samples_dir) as srv:
++        host, port = srv.server_address
++        base_url = f"http://{host}:{port}/"
++        url = urljoin(base_url, image_name)
++
++        # Replace heavy Remover with a lightweight stub
++        from PIL import Image as PILImage
++        import numpy as np
++        class DummyRemover:
++            def __init__(self, *args, **kwargs):
++                pass
++            def process(self, img, type="rgba", threshold=None, reverse=False):
++                # Return the image unchanged
++                if isinstance(img, PILImage.Image):
++                    return img
++                return PILImage.fromarray(np.array(img))
++
++        import transparent_background.Remover as rem_mod
++        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
++
++        out_dir = tmp_path
++        rem_mod.entry_point(
++            out_type="map",
++            mode="base",
++            device=None,
++            ckpt=None,
++            source=url,
++            dest=str(out_dir),
++            jit=False,
++            threshold=None,
++            resize="static",
++            save_format=None,
++            reverse=False,
++            flet_progress=None,
++            flet_page=None,
++            preview=None,
++            preview_out=None,
++            options=None,
++        )
++
++        # Expect an output file with derived name
++        expected = os.path.join(str(out_dir), "aeroplane_map.jpg")
++        assert os.path.isfile(expected)
++
++
++def test_urlvideoloader_len_with_mocked_download(tmp_path, monkeypatch):
++    # Avoid downloading a real video; ensure loader constructs and reports length
++    import transparent_background.utils as utils_mod
++    URLVideoLoader = getattr(utils_mod, "URLVideoLoader", None)
++    assert URLVideoLoader is not None, "URLVideoLoader not found"
++
++    # mock download_url_to_tempfile to create a tiny fake mp4 file
++    def fake_dl(url, suffix=None, timeout=60.0):
++        import tempfile
++        p = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
++        p.write(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
++        p.flush()
++        p.close()
++        return p.name
++
++    monkeypatch.setattr(utils_mod, "download_url_to_tempfile", fake_dl)
++
++    loader = URLVideoLoader("http://example.com/foo.mp4")
++    assert len(loader) == 1
