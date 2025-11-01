@@ -31,7 +31,7 @@ index 0000000..34b2302
 +    assert True
 +diff --git a/tests/new/test_remote_input_utils.py b/tests/new/test_remote_input_utils.py
 new file mode 100644
-index 0000000..def1234
+index 0000000..aaaa111
 --- /dev/null
 +++ b/tests/new/test_remote_input_utils.py
 @@ -0,0 +1,314 @@

@@ -40,15 +40,18 @@ def test_is_url_simple():
 
 
 def test_remote_image_helpers_work(tmp_path):
-    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
-    image_name = "aeroplane.jpg"
-    image_path = os.path.join(samples_dir, image_name)
-    assert os.path.isfile(image_path), "Sample image missing"
+    # Create a local image to serve
+    serve_dir = tmp_path / "serve1"
+    serve_dir.mkdir()
+    from PIL import Image as PILImage
+    img_local = PILImage.new("RGB", (32, 32), (123, 222, 111))
+    img_name = "img.jpg"
+    img_local.save(str(serve_dir / img_name), format="JPEG")
 
-    with run_http_server(samples_dir) as srv:
+    with run_http_server(str(serve_dir)) as srv:
         host, port = srv.server_address
         base_url = f"http://{host}:{port}/"
-        url = urljoin(base_url, image_name)
+        url = urljoin(base_url, img_name)
 
         # Helper must exist
         fetch_fn = getattr(tbu, "fetch_image_from_url", None)
@@ -73,20 +76,25 @@ def test_remote_image_helpers_work(tmp_path):
         assert fmt_fn(url, content_type="image/jpeg") == "Image"
 
 
-def test_urlimageloader_len_and_name():
-    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
-    image_name = "aeroplane.jpg"
-    with run_http_server(samples_dir) as srv:
+def test_urlimageloader_len_and_name(tmp_path):
+    serve_dir = tmp_path / "serve2"
+    serve_dir.mkdir()
+    from PIL import Image as PILImage
+    img_local = PILImage.new("RGB", (16, 16), (10, 20, 30))
+    img_name = "pic.jpg"
+    img_local.save(str(serve_dir / img_name), format="JPEG")
+
+    with run_http_server(str(serve_dir)) as srv:
         host, port = srv.server_address
         base_url = f"http://{host}:{port}/"
-        url = urljoin(base_url, image_name)
+        url = urljoin(base_url, img_name)
 
         URLImageLoader = getattr(tbu, "URLImageLoader", None)
         assert URLImageLoader is not None, "URLImageLoader not found"
         loader = URLImageLoader(url)
         assert len(loader) == 1
         img, name = next(iter(loader))
-        assert name.endswith(image_name)
+        assert name.endswith(img_name)
         assert hasattr(img, "size") and img.size[0] > 0 and img.size[1] > 0
 
 
@@ -108,15 +116,20 @@ def test_fetch_and_download_404_raises():
 
 
 def test_entry_point_image_url_writes_output(tmp_path, monkeypatch):
-    samples_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "samples")
-    image_name = "aeroplane.jpg"
-    with run_http_server(samples_dir) as srv:
+    # Create server with image
+    serve_dir = tmp_path / "serve3"
+    serve_dir.mkdir()
+    from PIL import Image as PILImage
+    img_local = PILImage.new("RGB", (24, 24), (1, 2, 3))
+    image_name = "photo.jpg"
+    img_local.save(str(serve_dir / image_name), format="JPEG")
+
+    with run_http_server(str(serve_dir)) as srv:
         host, port = srv.server_address
         base_url = f"http://{host}:{port}/"
         url = urljoin(base_url, image_name)
 
         # Replace heavy Remover with a lightweight stub
-        from PIL import Image as PILImage
         class DummyRemover:
             def __init__(self, *args, **kwargs):
                 pass
@@ -150,7 +163,7 @@ def test_entry_point_image_url_writes_output(tmp_path, monkeypatch):
         )
 
         # Expect an output file with derived name
-        expected = os.path.join(str(out_dir), "aeroplane_map.jpg")
+        expected = os.path.join(str(out_dir), "photo_map.jpg")
         assert os.path.isfile(expected)
 
 
