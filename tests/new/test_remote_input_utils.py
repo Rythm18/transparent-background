@@ -7,6 +7,9 @@ from urllib.parse import urljoin
 
 import pytest
 
+# Ensure requests is present; otherwise skip these tests to avoid environment flakiness
+pytest.importorskip("requests")
+
 from transparent_background.utils import is_url
 
 # We will import these only after feature is implemented.
