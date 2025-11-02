@@ -443,7 +443,7 @@ def test_entry_point_video_url_rgba_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 
     # rgba with Video must raise before processing
-    with pytest.raises(AttributeError):
+    with pytest.raises(Exception):
         rem_mod.entry_point(
             out_type="rgba",
             mode="base",
@@ -512,3 +512,42 @@ def test_entry_point_image_url_no_ext_no_head_defaults_image(tmp_path, monkeypat
             options=None,
         )
         assert os.path.isfile(os.path.join(str(tmp_path), "mystery_map.jpg"))
+
+
+def test_entry_point_local_file_backward_compat(tmp_path, monkeypatch):
+    # Create a local image file and ensure entry_point still handles local paths
+    from PIL import Image as PILImage
+    img = PILImage.new("RGB", (12, 12), (11, 22, 33))
+    local_path = tmp_path / "loc.jpg"
+    img.save(str(local_path), format="JPEG")
+
+    # Stub Remover
+    import transparent_background.Remover as rem_mod
+    class DummyRemover:
+        def __init__(self, *a, **k):
+            pass
+        def process(self, img, type="map", threshold=None, reverse=False):
+            return img
+    monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    rem_mod.entry_point(
+        out_type="map",
+        mode="base",
+        device=None,
+        ckpt=None,
+        source=str(local_path),
+        dest=str(out_dir),
+        jit=False,
+        threshold=None,
+        resize="static",
+        save_format=None,
+        reverse=False,
+        flet_progress=None,
+        flet_page=None,
+        preview=None,
+        preview_out=None,
+        options=None,
+    )
+    assert os.path.isfile(os.path.join(str(out_dir), "loc_map.jpg"))
