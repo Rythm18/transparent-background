@@ -297,6 +297,22 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
         else:
             raise ImportError("pyvirtualcam not found. Install with \"pip install transparent-background[webcam]\"")
 
+    elif is_url(source):
+        # Remote input via HTTP/HTTPS
+        # Determine format from URL or content-type
+        ct = None
+        try:
+            import requests as _req
+            h = _req.head(source, timeout=5)
+            if 'content-type' in h.headers:
+                ct = h.headers['content-type']
+        except Exception:
+            ct = None
+        _format = get_format_from_url(source, ct)
+        if _format == '':
+            _format = 'Image'
+        save_dir = os.getcwd()
+
     elif os.path.isdir(source):
         save_dir = os.path.join(os.getcwd(), source.split(os.sep)[-1])
         _format = get_format(os.listdir(source))
@@ -317,7 +333,13 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
 
-    loader = eval(_format + "Loader")(source)
+    if is_url(source):
+        if _format == 'Video':
+            loader = URLVideoLoader(source)
+        else:
+            loader = URLImageLoader(source)
+    else:
+        loader = eval(_format + "Loader")(source)
     frame_progress = tqdm.tqdm(
         total=len(loader),
         position=1 if (_format == "Video" and len(loader) > 1) else 0,
