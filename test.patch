@@ -31,10 +31,10 @@ index 0000000..34b2302
 +    assert True
 diff --git a/tests/new/test_remote_input_utils.py b/tests/new/test_remote_input_utils.py
 new file mode 100644
-index 0000000..e63d39d
+index 0000000..3bd221f
 --- /dev/null
 +++ b/tests/new/test_remote_input_utils.py
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,661 @@
 +import os
 +import threading
 +import socket
@@ -42,11 +42,14 @@ index 0000000..e63d39d
 +from http.server import HTTPServer, SimpleHTTPRequestHandler
 +from urllib.parse import urljoin
 +import shutil
++import importlib
 +
 +import pytest
-+import requests
 +
-+from transparent_background.utils import is_url
++try:
++    import requests  # optional dependency for remote URL support
++except ImportError:  # pragma: no cover - base repo may lack requests
++    requests = None
 +
 +# We will import these only after feature is implemented.
 +# For base code, tests still reference their names via getattr to ensure failure is explicit.
@@ -70,13 +73,27 @@ index 0000000..e63d39d
 +        thread.join(timeout=2)
 +
 +
++def require_callable(attr_name):
++    fn = getattr(tbu, attr_name, None)
++    assert callable(fn), f"{attr_name} not found"
++    return fn
++
++
++def require_requests():
++    if requests is None:
++        pytest.fail("requests dependency required for remote URL support tests")
++    return requests
++
++
 +def test_is_url_simple():
++    is_url = require_callable("is_url")
 +    assert is_url("http://example.com/foo.jpg")
 +    assert is_url("https://example.com/bar.mp4")
 +    assert not is_url("/local/path/file.jpg")
 +
 +
 +def test_remote_image_helpers_work(tmp_path):
++    require_requests()
 +    # Create a local image to serve
 +    serve_dir = tmp_path / "serve1"
 +    serve_dir.mkdir()
@@ -91,8 +108,7 @@ index 0000000..e63d39d
 +        url = urljoin(base_url, img_name)
 +
 +        # Helper must exist
-+        fetch_fn = getattr(tbu, "fetch_image_from_url", None)
-+        assert callable(fetch_fn), "fetch_image_from_url not found"
++        fetch_fn = require_callable("fetch_image_from_url")
 +
 +        img = fetch_fn(url, timeout=10.0)
 +        # Validate a real image
@@ -100,20 +116,19 @@ index 0000000..e63d39d
 +        assert getattr(img, "mode", "RGB") == "RGB"
 +
 +        # Download helper
-+        dl_fn = getattr(tbu, "download_url_to_tempfile", None)
-+        assert callable(dl_fn), "download_url_to_tempfile not found"
++        dl_fn = require_callable("download_url_to_tempfile")
 +
 +        temp_path = dl_fn(url, timeout=10.0)
 +        assert os.path.isfile(temp_path)
 +        assert os.path.getsize(temp_path) > 0
 +
 +        # Format inference
-+        fmt_fn = getattr(tbu, "get_format_from_url", None)
-+        assert callable(fmt_fn), "get_format_from_url not found"
++        fmt_fn = require_callable("get_format_from_url")
 +        assert fmt_fn(url, content_type="image/jpeg") == "Image"
 +
 +
 +def test_urlimageloader_len_and_name(tmp_path):
++    require_requests()
 +    serve_dir = tmp_path / "serve2"
 +    serve_dir.mkdir()
 +    from PIL import Image as PILImage
@@ -126,8 +141,7 @@ index 0000000..e63d39d
 +        base_url = f"http://{host}:{port}/"
 +        url = urljoin(base_url, img_name)
 +
-+        URLImageLoader = getattr(tbu, "URLImageLoader", None)
-+        assert URLImageLoader is not None, "URLImageLoader not found"
++        URLImageLoader = require_callable("URLImageLoader")
 +        loader = URLImageLoader(url)
 +        assert len(loader) == 1
 +        img, name = next(iter(loader))
@@ -135,7 +149,23 @@ index 0000000..e63d39d
 +        assert hasattr(img, "size") and img.size[0] > 0 and img.size[1] > 0
 +
 +
++def test_urlimageloader_default_name_when_basename_missing(monkeypatch):
++    require_requests()
++    URLImageLoader = require_callable("URLImageLoader")
++
++    from PIL import Image as PILImage
++
++    dummy_image = PILImage.new("RGB", (8, 8), (1, 1, 1))
++    monkeypatch.setattr(tbu, "fetch_image_from_url", lambda url, timeout=30.0: dummy_image)
++
++    loader = URLImageLoader("http://example.com")
++    img, name = next(iter(loader))
++    assert img.size == dummy_image.size
++    assert name == "remote.jpg"
++
++
 +def test_fetch_and_download_404_raises(tmp_path):
++    req = require_requests()
 +    # Serve empty directory; any path will 404
 +    serve_dir = tmp_path / "serve404"
 +    serve_dir.mkdir()
@@ -144,17 +174,41 @@ index 0000000..e63d39d
 +        base_url = f"http://{host}:{port}/"
 +        bad_url = urljoin(base_url, "no_such_file.jpg")
 +
-+        fetch_fn = getattr(tbu, "fetch_image_from_url", None)
-+        dl_fn = getattr(tbu, "download_url_to_tempfile", None)
-+        assert callable(fetch_fn) and callable(dl_fn)
++        fetch_fn = require_callable("fetch_image_from_url")
++        dl_fn = require_callable("download_url_to_tempfile")
 +
-+        with pytest.raises(requests.RequestException):
++        with pytest.raises(req.RequestException):
 +            fetch_fn(bad_url, timeout=5.0)
-+        with pytest.raises(requests.RequestException):
++        with pytest.raises(req.RequestException):
 +            dl_fn(bad_url, timeout=5.0)
 +
 +
++def test_download_helpers_connection_error_propagates(monkeypatch):
++    req = require_requests()
++    fetch_fn = require_callable("fetch_image_from_url")
++    dl_fn = require_callable("download_url_to_tempfile")
++
++    conn_error = req.ConnectionError("network unreachable")
++
++    def raise_conn_error(*args, **kwargs):
++        raise conn_error
++
++    monkeypatch.setattr(req, "get", raise_conn_error)
++    monkeypatch.setattr(req, "head", raise_conn_error)
++
++    with pytest.raises(req.RequestException):
++        fetch_fn("http://example.com/img.jpg", timeout=1.0)
++    with pytest.raises(req.RequestException):
++        dl_fn("http://example.com/video.mp4", timeout=1.0)
++
++
++def test_get_format_from_url_video_content_type():
++    fmt_fn = require_callable("get_format_from_url")
++    assert fmt_fn("http://example.com/stream", content_type="video/mp4") == "Video"
++
++
 +def test_entry_point_image_url_writes_output(tmp_path, monkeypatch):
++    require_requests()
 +    # Create server with image
 +    serve_dir = tmp_path / "serve3"
 +    serve_dir.mkdir()
@@ -178,7 +232,7 @@ index 0000000..e63d39d
 +                    return img
 +                return img
 +
-+        import transparent_background.Remover as rem_mod
++        rem_mod = importlib.import_module("transparent_background.Remover")
 +        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 +
 +        out_dir = tmp_path
@@ -207,6 +261,7 @@ index 0000000..e63d39d
 +
 +
 +def test_entry_point_image_url_no_ext_content_type_and_default_dest(tmp_path, monkeypatch):
++    req = require_requests()
 +    # Prepare a dir with a file named 'content' (no extension) serving image bytes
 +    serve_dir = tmp_path / "serve"
 +    serve_dir.mkdir()
@@ -226,7 +281,7 @@ index 0000000..e63d39d
 +        # Force HEAD to report image content-type
 +        class H:
 +            headers = {"content-type": "image/jpeg"}
-+        monkeypatch.setattr(requests, "head", lambda *a, **k: H())
++        monkeypatch.setattr(req, "head", lambda *a, **k: H())
 +
 +        # Stub Remover
 +        class DummyRemover:
@@ -236,7 +291,7 @@ index 0000000..e63d39d
 +                if isinstance(img, PILImage.Image):
 +                    return img
 +                return img
-+        import transparent_background.Remover as rem_mod
++        rem_mod = importlib.import_module("transparent_background.Remover")
 +        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 +
 +        # Run without dest: output should go to CWD
@@ -267,6 +322,7 @@ index 0000000..e63d39d
 +    import transparent_background.utils as utils_mod
 +    URLVideoLoader = getattr(utils_mod, "URLVideoLoader", None)
 +    assert URLVideoLoader is not None, "URLVideoLoader not found"
++    require_callable("download_url_to_tempfile")
 +
 +    # mock download_url_to_tempfile to create a tiny fake mp4 file
 +    def fake_dl(url, suffix=None, timeout=60.0):
@@ -302,8 +358,9 @@ index 0000000..e63d39d
 +
 +
 +def test_entry_point_video_url_writes_output_and_cleans_temp(tmp_path, monkeypatch):
-+    import transparent_background.Remover as rem_mod
++    rem_mod = importlib.import_module("transparent_background.Remover")
 +    import transparent_background.utils as utils_mod
++    require_callable("download_url_to_tempfile")
 +
 +    # Mock download to known temp path
 +    fake_temp = str(tmp_path / "tmpvid.mp4")
@@ -386,13 +443,15 @@ index 0000000..e63d39d
 +
 +
 +def test_entry_point_video_url_no_ext_content_type(tmp_path, monkeypatch):
-+    import transparent_background.Remover as rem_mod
++    req = require_requests()
++    rem_mod = importlib.import_module("transparent_background.Remover")
 +    import transparent_background.utils as utils_mod
++    require_callable("download_url_to_tempfile")
 +
 +    # Mock HEAD to report video content-type when URL lacks extension
 +    class H:
 +        headers = {"content-type": "video/mp4"}
-+    monkeypatch.setattr(requests, "head", lambda *a, **k: H())
++    monkeypatch.setattr(req, "head", lambda *a, **k: H())
 +
 +    fake_temp = str(tmp_path / "tmpvid2.mp4")
 +    def fake_dl(url, suffix=None, timeout=60.0):
@@ -472,7 +531,8 @@ index 0000000..e63d39d
 +
 +
 +def test_entry_point_video_url_rgba_raises(tmp_path, monkeypatch):
-+    import transparent_background.Remover as rem_mod
++    require_requests()
++    rem_mod = importlib.import_module("transparent_background.Remover")
 +    # Stub Remover to avoid heavy init
 +    class DummyRemover:
 +        def __init__(self, *a, **k):
@@ -502,6 +562,7 @@ index 0000000..e63d39d
 +
 +
 +def test_entry_point_image_url_no_ext_no_head_defaults_image(tmp_path, monkeypatch):
++    req = require_requests()
 +    # Prepare server serving 'mystery' without extension and HEAD failing
 +    serve_dir = tmp_path / "serve4"
 +    serve_dir.mkdir()
@@ -518,15 +579,15 @@ index 0000000..e63d39d
 +
 +        # Fail HEAD
 +        def head_fail(*a, **k):
-+            raise requests.RequestException("HEAD fail")
-+        monkeypatch.setattr(requests, "head", head_fail)
++            raise req.RequestException("HEAD fail")
++        monkeypatch.setattr(req, "head", head_fail)
 +
 +        class DummyRemover:
 +            def __init__(self, *a, **k):
 +                pass
 +            def process(self, img, type="map", threshold=None, reverse=False):
 +                return img
-+        import transparent_background.Remover as rem_mod
++        rem_mod = importlib.import_module("transparent_background.Remover")
 +        monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
 +
 +        monkeypatch.chdir(str(tmp_path))
@@ -551,6 +612,53 @@ index 0000000..e63d39d
 +        assert os.path.isfile(os.path.join(str(tmp_path), "mystery_map.jpg"))
 +
 +
++def test_entry_point_directory_backward_compat(tmp_path, monkeypatch):
++    from PIL import Image as PILImage
++
++    input_dir = tmp_path / "batch"
++    input_dir.mkdir()
++    img = PILImage.new("RGB", (16, 16), (7, 7, 7))
++    sample_path = input_dir / "sample.jpg"
++    img.save(str(sample_path), format="JPEG")
++
++    rem_mod = importlib.import_module("transparent_background.Remover")
++
++    class DummyRemover:
++        def __init__(self, *args, **kwargs):
++            pass
++
++        def process(self, img, type="map", threshold=None, reverse=False):
++            return img
++
++    monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
++
++    run_dir = tmp_path / "run"
++    run_dir.mkdir()
++    monkeypatch.chdir(str(run_dir))
++
++    rem_mod.entry_point(
++        out_type="map",
++        mode="base",
++        device=None,
++        ckpt=None,
++        source=str(input_dir),
++        dest=None,
++        jit=False,
++        threshold=None,
++        resize="static",
++        save_format=None,
++        reverse=False,
++        flet_progress=None,
++        flet_page=None,
++        preview=None,
++        preview_out=None,
++        options=None,
++    )
++
++    expected = run_dir / "batch" / "sample_map.jpg"
++    assert expected.is_file()
++
++
 +def test_entry_point_local_file_backward_compat(tmp_path, monkeypatch):
 +    # Create a local image file and ensure entry_point still handles local paths
 +    from PIL import Image as PILImage
@@ -559,7 +667,7 @@ index 0000000..e63d39d
 +    img.save(str(local_path), format="JPEG")
 +
 +    # Stub Remover
-+    import transparent_background.Remover as rem_mod
++    rem_mod = importlib.import_module("transparent_background.Remover")
 +    class DummyRemover:
 +        def __init__(self, *a, **k):
 +            pass
