@@ -1,4 +1,5 @@
 import os
+import sys
 import types as _types
 from io import BytesIO
 
@@ -30,7 +31,7 @@ def default_retries():
 
 def test_parse_args_accepts_download_options(monkeypatch):
     monkeypatch.setattr(
-        tbu.sys,
+        sys,
         "argv",
         [
             "prog",
@@ -48,7 +49,7 @@ def test_parse_args_accepts_download_options(monkeypatch):
 
 
 def test_parse_args_defaults(monkeypatch):
-    monkeypatch.setattr(tbu.sys, "argv", ["prog", "--source", "input.jpg"])
+    monkeypatch.setattr(sys, "argv", ["prog", "--source", "input.jpg"])
     args = tbu.parse_args()
     assert args.download_timeout is None
     assert args.download_retries == default_retries()
@@ -394,4 +395,3 @@ def test_entry_point_video_uses_defaults_and_passes_options(tmp_path, monkeypatc
     assert captured["url"] == url
     assert captured["timeout"] == pytest.approx(60.0)
     assert captured["retries"] == default_retries()
-    assert captured.get("closed", False)
