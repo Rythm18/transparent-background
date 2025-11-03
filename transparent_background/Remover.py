@@ -25,6 +25,7 @@ sys.path.append(repopath)
 
 from transparent_background.InSPyReNet import InSPyReNet_SwinB
 from transparent_background.utils import *
+import transparent_background.utils as utils_mod
 
 class Remover:
     def __init__(self, mode="base", jit=False, device=None, ckpt=None, resize='static'):
@@ -280,12 +281,33 @@ def to_base64(image):
     base64_img = base64.b64encode(buffered.getvalue()).decode("utf-8")
     return base64_img
 
-def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resize, save_format=None, reverse=False, flet_progress=None, flet_page=None, preview=None, preview_out=None, options=None):
+def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resize, save_format=None, reverse=False, flet_progress=None, flet_page=None, preview=None, preview_out=None, options=None, download_timeout=None, download_retries=None):
     warnings.filterwarnings("ignore")
 
     remover = Remover(mode=mode, jit=jit, device=device, ckpt=ckpt, resize=resize)
 
-    if source.isnumeric() is True:
+    loader = None
+
+    if utils_mod.is_url(source):
+        remote_format = utils_mod.get_format_from_url(source)
+        normalized = (remote_format or "").strip().lower()
+        if normalized == "video":
+            _format = "Video"
+        elif normalized == "image":
+            _format = "Image"
+        else:
+            _format = "Image"
+        save_dir = dest if dest is not None else os.getcwd()
+        effective_retries = download_retries if download_retries is not None else utils_mod._DEFAULT_RETRIES
+        effective_timeout = download_timeout if download_timeout is not None else (
+            utils_mod._DEFAULT_VIDEO_TIMEOUT if normalized == "video" else utils_mod._DEFAULT_IMAGE_TIMEOUT
+        )
+        if _format == "Video":
+            loader = utils_mod.URLVideoLoader(source, timeout=effective_timeout, retries=effective_retries)
+        else:
+            loader = utils_mod.URLImageLoader(source, timeout=effective_timeout, retries=effective_retries)
+
+    elif source.isnumeric() is True:
         save_dir = None
         _format = "Webcam"
         if importlib.util.find_spec('pyvirtualcam') is not None:
@@ -317,7 +339,8 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
 
-    loader = eval(_format + "Loader")(source)
+    if loader is None:
+        loader = eval(_format + "Loader")(source)
     frame_progress = tqdm.tqdm(
         total=len(loader),
         position=1 if (_format == "Video" and len(loader) > 1) else 0,
@@ -358,16 +381,33 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
             outname += '_reverse'
 
         if _format == "Video" and writer is None:
+            fps = getattr(loader, "fps", None)
+            if not fps:
+                cap = getattr(loader, "cap", None)
+                if cap is not None and hasattr(cap, "get"):
+                    try:
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                    except Exception:
+                        fps = None
+            if not fps:
+                fps = 30
             writer = cv2.VideoWriter(
                 os.path.join(save_dir, f"{outname}.{ext}"),
                 cv2.VideoWriter_fourcc(*"mp4v"),
-                loader.fps,
+                fps,
                 img.size,
             )
             writer.set(cv2.VIDEOWRITER_PROP_QUALITY, 100)
             frame_progress.refresh()
             frame_progress.reset()
-            frame_progress.total = int(loader.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_count = None
+            if cap is not None and hasattr(cap, "get"):
+                try:
+                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                except Exception:
+                    frame_count = None
+            if frame_count:
+                frame_progress.total = int(frame_count)
             if sample_progress is not None:
                 sample_progress.update()
 
@@ -418,8 +458,28 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
         if options is not None and options['abort']:
             break
         
+    if hasattr(loader, "close"):
+        try:
+            loader.close()
+        except Exception:
+            pass
+
     print("\nDone. Results are saved in {}".format(os.path.abspath(save_dir)))
 
 def console():
     args = parse_args()
-    entry_point(args.type, args.mode, args.device, args.ckpt, args.source, args.dest, args.jit, args.threshold, args.resize, args.format, args.reverse)
+    entry_point(
+        args.type,
+        args.mode,
+        args.device,
+        args.ckpt,
+        args.source,
+        args.dest,
+        args.jit,
+        args.threshold,
+        args.resize,
+        args.format,
+        args.reverse,
+        download_timeout=args.download_timeout,
+        download_retries=args.download_retries,
+    )

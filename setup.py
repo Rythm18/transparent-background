@@ -43,6 +43,7 @@ setuptools.setup(
         "pyyaml>=6.0",
         "albumentations>=1.4.16",
         "pymatting>=1.1.13",
+        "requests>=2.28.0",
     ],
     extras_require={
         "webcam": ["pyvirtualcam>=0.6.0"],
