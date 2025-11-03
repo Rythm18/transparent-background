@@ -1,5 +1,4 @@
 import os
-import importlib
 import types as _types
 from io import BytesIO
 
@@ -73,6 +72,7 @@ def test_download_url_to_tempfile_retries_with_backoff(tmp_path, monkeypatch):
     class FailingThenSuccess:
         def __init__(self):
             self.calls = 0
+
         def __call__(self, url, stream=True, timeout=None):
             self.calls += 1
             attempts.append(timeout)
@@ -128,6 +128,7 @@ def test_download_url_to_tempfile_raises_last_exception(monkeypatch):
     class Failing:
         def __init__(self):
             self.calls = 0
+
         def __call__(self, url, stream=True, timeout=None):
             self.calls += 1
             if self.calls == 1:
@@ -175,13 +176,26 @@ def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
     assert recorded[1] == 30.0  # default
 
 
-def test_fetch_image_honours_retries(monkeypatch):
+def test_fetch_image_retries_backoff_and_last_exception(monkeypatch):
     req = require_requests()
     fetch_fn = require_callable("fetch_image_from_url")
 
-    class FailingUntilThird:
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        pytest.skip("Pillow required for image serialization tests")
+
+    payload = BytesIO()
+    PILImage.new("RGB", (4, 4), (7, 8, 9)).save(payload, format="PNG")
+    payload_bytes = payload.getvalue()
+
+    sleeps = []
+    monkeypatch.setattr(tbu.time, "sleep", lambda duration: sleeps.append(round(duration, 3)))
+
+    class Flaky:
         def __init__(self):
             self.calls = 0
+
         def __call__(self, url, stream=True, timeout=None):
             self.calls += 1
             if self.calls < 3:
@@ -190,31 +204,44 @@ def test_fetch_image_honours_retries(monkeypatch):
                 __enter__=lambda s: s,
                 __exit__=lambda s, exc_type, exc, tb: False,
                 raise_for_status=lambda s: None,
-                content=b"image",
+                content=payload_bytes,
             )
 
-    monkeypatch.setattr(req, "get", FailingUntilThird())
+    flaky = Flaky()
+    monkeypatch.setattr(req, "get", flaky)
 
     img = fetch_fn("http://example.com/retry.png", retries=3)
-    assert getattr(img, "size", (1,))[0] >= 1
+    assert img.size == (4, 4)
+    assert sleeps[:2] == [0.5, 1.0]
+
+    sleeps.clear()
 
     class AlwaysFail:
+        def __init__(self):
+            self.calls = 0
+
         def __call__(self, url, stream=True, timeout=None):
-            raise req.ConnectionError("fail")
+            self.calls += 1
+            if self.calls == 1:
+                raise req.Timeout("first")
+            raise req.ConnectionError("second")
 
     monkeypatch.setattr(req, "get", AlwaysFail())
-    with pytest.raises(req.ConnectionError):
+
+    with pytest.raises(req.ConnectionError) as exc:
         fetch_fn("http://example.com/fail.png", retries=2)
+    assert "second" in str(exc.value)
+    assert sleeps and sleeps[0] == 0.5
 
 
-def test_entry_point_passes_download_options(tmp_path, monkeypatch):
+def test_entry_point_image_passes_download_options(tmp_path, monkeypatch):
     require_requests()
     try:
         from PIL import Image as PILImage
     except ImportError:
         pytest.skip("Pillow required for image serialization tests")
-    url = "http://example.com/photo.jpg"
 
+    url = "http://example.com/photo.jpg"
     captured = {}
 
     class FakeLoader:
@@ -222,28 +249,35 @@ def test_entry_point_passes_download_options(tmp_path, monkeypatch):
             captured["url"] = passed_url
             captured["timeout"] = timeout
             captured["retries"] = retries
-            self.frames = [(PILImage.new("RGB", (5, 5), (9, 9, 9)), "photo.jpg")]
-            self size = 1
+            self._frames = [(PILImage.new("RGB", (5, 5), (9, 9, 9)), "photo.jpg")]
+            self._index = 0
+
         def __iter__(self):
-            self.i = 0
+            self._index = 0
             return self
+
         def __next__(self):
-            if self.i >= len(self.frames):
+            if self._index >= len(self._frames):
                 raise StopIteration
-            frame = self.frames[self.i]
-            self.i += 1
+            frame = self._frames[self._index]
+            self._index += 1
             return frame
+
         def __len__(self):
-            return self size
+            return len(self._frames)
+
+        def close(self):
+            pass
 
     monkeypatch.setattr(tbu, "URLImageLoader", FakeLoader)
-    monkeypatch.setattr(tbu, "URLVideoLoader", FakeLoader)
+    monkeypatch.setattr(tbu, "URLVideoLoader", FakeLoader, raising=False)
 
     import transparent_background.Remover as rem_mod
 
     class DummyRemover:
         def __init__(self, *args, **kwargs):
             pass
+
         def process(self, img, type="map", threshold=None, reverse=False):
             return img
 
@@ -278,42 +312,86 @@ def test_entry_point_passes_download_options(tmp_path, monkeypatch):
     assert captured["retries"] == 2
 
 
-def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
+def test_entry_point_video_uses_defaults_and_passes_options(tmp_path, monkeypatch):
     require_requests()
-    import transparent_background.utils as utils_mod
-
     try:
-        import types as _types_local
+        from PIL import Image as PILImage
     except ImportError:
-        pytest.skip("types module required")
+        pytest.skip("Pillow required for image serialization tests")
 
-    recorded = {}
-
-    def fake_dl(url, suffix=None, timeout=None, retries=None):
-        recorded["timeout"] = timeout
-        recorded["retries"] = retries
-        temp_path = tmp_path / "temp.mp4"
-        temp_path.write_bytes(b"data")
-        return str(temp_path)
-
-    monkeypatch.setattr(utils_mod, "download_url_to_tempfile", fake_dl)
+    url = "http://example.com/video.mp4"
+    captured = {}
 
     class FakeVideoLoader:
-        def __init__(self, path):
-            self.frames = [(b"frame", "video.mp4")]
-            self size = 1
-            self.fps = 30
-            self.cap = _types_local.SimpleNamespace(get=lambda prop: 1)
-        def __iter__(self):
-            self.i = 0
-            return self
-        def __next__(self):
-            if self.i >= len(self.frames):
-                raise StopIteration
-            value = self.frames[self.i]
-            self.i += 1
-            return value
-        def __len__(self):
-            return self size
+        def __init__(self, passed_url, *, timeout, retries):
+            captured["url"] = passed_url
+            captured["timeout"] = timeout
+            captured["retries"] = retries
+            frame = PILImage.new("RGB", (6, 6), (1, 1, 1))
+            self._frames = [(frame, "video.mp4")]
+            self._index = 0
+            self.cap = _types.SimpleNamespace(release=lambda: None)
 
-    monkeypatch.setattr(unittest.transparent_background.utils.VideoLoader? etc (typo)
+        def __iter__(self):
+            self._index = 0
+            return self
+
+        def __next__(self):
+            if self._index >= len(self._frames):
+                raise StopIteration
+            frame = self._frames[self._index]
+            self._index += 1
+            return frame
+
+        def __len__(self):
+            return len(self._frames)
+
+        def close(self):
+            captured["closed"] = True
+
+    def fail_image_loader(*args, **kwargs):
+        raise AssertionError("image loader should not be used for video URLs")
+
+    monkeypatch.setattr(tbu, "URLVideoLoader", FakeVideoLoader)
+    monkeypatch.setattr(tbu, "URLImageLoader", fail_image_loader, raising=False)
+    monkeypatch.setattr(tbu, "get_format_from_url", lambda _: "video")
+
+    import transparent_background.Remover as rem_mod
+
+    class DummyRemover:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def process(self, img, type="map", threshold=None, reverse=False):
+            return img
+
+    monkeypatch.setattr(rem_mod, "Remover", DummyRemover)
+
+    dest = tmp_path / "video-out"
+    dest.mkdir()
+
+    rem_mod.entry_point(
+        out_type="map",
+        mode="base",
+        device=None,
+        ckpt=None,
+        source=url,
+        dest=str(dest),
+        jit=False,
+        threshold=None,
+        resize="static",
+        save_format=None,
+        reverse=False,
+        flet_progress=None,
+        flet_page=None,
+        preview=None,
+        preview_out=None,
+        options=None,
+        download_timeout=None,
+        download_retries=None,
+    )
+
+    assert captured["url"] == url
+    assert captured["timeout"] == pytest.approx(60.0)
+    assert captured["retries"] == default_retries()
+    assert captured.get("closed", False)
