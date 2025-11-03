@@ -137,7 +137,26 @@ def main(page):
         output_type = options['output_type']
         output_type = options['color'] if output_type == 'custom' else output_type
         options['abort'] = False
-        entry_point(output_type, options['mode'], options['device'], options['ckpt'], options['source'], options['dest'], options['jit'], options['threshold'], options['resize'], options['format'], options['reverse'], progress_ring, page, preview, preview_out, options)
+        entry_point(
+            output_type,
+            options['mode'],
+            options['device'],
+            options['ckpt'],
+            options['source'],
+            options['dest'],
+            options['jit'],
+            options['threshold'],
+            options['resize'],
+            options['format'],
+            options['reverse'],
+            progress_ring,
+            page,
+            preview,
+            preview_out,
+            options,
+            download_timeout=options.get('download_timeout') if isinstance(options, dict) else None,
+            download_retries=options.get('download_retries') if isinstance(options, dict) else None,
+        )
 
     def click_abort(e):
         options['abort'] = True
