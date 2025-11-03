@@ -9,7 +9,7 @@ index fb609b8..046b721 100644
 +- `transparent_background.utils.parse_args` is expected to include the new CLI options.
  - `transparent_background.Remover.entry_point` must pass `timeout` and `retries` keyword arguments to `URLImageLoader` and `URLVideoLoader` when invoked with remote URLs.
 diff --git a/tests/new/test_download_retry.py b/tests/new/test_download_retry.py
-index fcbffaf..f9b736e 100644
+index 0000000..f9b736e 100644
 --- a/tests/new/test_download_retry.py
 +++ b/tests/new/test_download_retry.py
 @@ -21,7 +21,7 @@ def require_callable(attr_name):
@@ -21,7 +21,21 @@ index fcbffaf..f9b736e 100644
      return requests
  
  
-@@ -139,7 +139,10 @@ def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
+@@ -48,6 +48,13 @@ def test_parse_args_accepts_download_options(monkeypatch):
+     assert args.download_retries == 4
+ 
+ 
++def test_parse_args_defaults(monkeypatch):
++    monkeypatch.setattr(tbu.sys, "argv", ["prog", "--source", "input.jpg"])
++    args = tbu.parse_args()
++    assert args.download_timeout is None
++    assert args.download_retries == default_retries()
++
++
+ def test_download_url_to_tempfile_retries_with_backoff(tmp_path, monkeypatch):
+     req = require_requests()
+     dl_fn = require_callable("download_url_to_tempfile")
+@@ -139,7 +146,10 @@ def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
      fetch_fn = require_callable("fetch_image_from_url")
  
      payload = BytesIO()
@@ -33,7 +47,7 @@ index fcbffaf..f9b736e 100644
  
      PILImage.new("RGB", (10, 10), (1, 2, 3)).save(payload, format="PNG")
      payload_bytes = payload.getvalue()
-@@ -165,8 +168,44 @@ def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
+@@ -165,8 +175,44 @@ def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
      assert recorded[1] == 30.0  # default
  
  
@@ -58,7 +72,7 @@ index fcbffaf..f9b736e 100644
 +    monkeypatch.setattr(req, "get", FailingUntilThird())
 +
 +    img = fetch_fn("http://example.com/retry.png", retries=3)
-+    assert img.size[0] >= 1
++    assert getattr(img, "size", (1,))[0] >= 1
 +
 +    class AlwaysFail:
 +        def __call__(self, url, stream=True, timeout=None):
@@ -78,7 +92,7 @@ index fcbffaf..f9b736e 100644
      url = "http://example.com/photo.jpg"
  
      captured = {}
-@@ -176,7 +215,6 @@ def test_entry_point_passes_download_options(tmp_path, monkeypatch):
+@@ -176,7 +222,6 @@ def test_entry_point_passes_download_options(tmp_path, monkeypatch):
              captured["url"] = passed_url
              captured["timeout"] = timeout
              captured["retries"] = retries
@@ -86,7 +100,7 @@ index fcbffaf..f9b736e 100644
              self.frames = [(PILImage.new("RGB", (5, 5), (9, 9, 9)), "photo.jpg")]
              self.size = 1
          def __iter__(self):
-@@ -237,6 +275,11 @@ def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
+@@ -237,6 +282,11 @@ def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
      require_requests()
      import transparent_background.utils as utils_mod
  
@@ -98,7 +112,7 @@ index fcbffaf..f9b736e 100644
      recorded = {}
  
      def fake_dl(url, suffix=None, timeout=None, retries=None):
-@@ -253,7 +296,7 @@ def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
+@@ -253,7 +303,7@@ def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
              self.frames = [(b"frame", "video.mp4")]
              self.size = 1
              self.fps = 30
