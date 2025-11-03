@@ -13,4 +13,3 @@ Agent Instructions
 Test Assumptions
 - Tests expect new CLI flags `--download-timeout` and `--download-retries`, plus corresponding keyword arguments on `transparent_background.Remover.entry_point` and the internal helper functions.
 - The helper `transparent_background.utils.download_url_to_tempfile(url, suffix=None, timeout=60.0, retries=3)` should exist after the change; tests will monkeypatch `requests` to count calls.
-- Retry logging uses `logging.debug("download attempt %d/%d", attempt, retries)` and should not alter error types raised back to callers.

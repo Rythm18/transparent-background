@@ -29,10 +29,10 @@ index 0000000..34b2302
 +    assert True
 diff --git a/tests/new/test_download_retry.py b/tests/new/test_download_retry.py
 new file mode 100644
-index 0000000..426bce3
+index 0000000..fcbffaf
 --- /dev/null
 +++ b/tests/new/test_download_retry.py
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,274 @@
 +import os
 +import importlib
 +import types as _types
@@ -58,6 +58,10 @@ index 0000000..426bce3
 +    if requests is None:
 +        pytest.fail("requests dependency required for download tests")
 +    return requests
++
++
++def default_retries():
++    return getattr(tbu, "_DEFAULT_RETRIES", 3)
 +
 +
 +def test_parse_args_accepts_download_options(monkeypatch):
@@ -120,6 +124,49 @@ index 0000000..426bce3
 +    finally:
 +        if os.path.exists(path):
 +            os.remove(path)
++
++
++def test_download_url_to_tempfile_backoff_cap(tmp_path, monkeypatch):
++    req = require_requests()
++    dl_fn = require_callable("download_url_to_tempfile")
++
++    monkeypatch.setattr(req, "head", lambda *a, **k: _types.SimpleNamespace(headers={}))
++
++    sleeps = []
++    monkeypatch.setattr(tbu.time, "sleep", lambda duration: sleeps.append(round(duration, 3)))
++
++    class AlwaysFail:
++        def __call__(self, url, stream=True, timeout=None):
++            raise req.ConnectionError("fail")
++
++    monkeypatch.setattr(req, "get", AlwaysFail())
++
++    with pytest.raises(req.ConnectionError):
++        dl_fn("http://example.com/vid.mp4", timeout=2.0, retries=6)
++
++    assert sleeps[:5] == [0.5, 1.0, 2.0, 4.0, 4.0]
++
++
++def test_download_url_to_tempfile_raises_last_exception(monkeypatch):
++    req = require_requests()
++    dl_fn = require_callable("download_url_to_tempfile")
++
++    monkeypatch.setattr(req, "head", lambda *a, **k: _types.SimpleNamespace(headers={}))
++
++    class Failing:
++        def __init__(self):
++            self.calls = 0
++        def __call__(self, url, stream=True, timeout=None):
++            self.calls += 1
++            if self.calls == 1:
++                raise req.Timeout("first")
++            raise req.ConnectionError("second")
++
++    monkeypatch.setattr(req, "get", Failing())
++
++    with pytest.raises(req.ConnectionError) as exc:
++        dl_fn("http://example.com/fail", timeout=3.0, retries=2)
++    assert "second" in str(exc.value)
 +
 +
 +def test_fetch_image_timeout_overrides_and_defaults(tmp_path, monkeypatch):
@@ -219,3 +266,44 @@ index 0000000..426bce3
 +    assert captured["url"] == url
 +    assert captured["timeout"] == pytest.approx(4.5)
 +    assert captured["retries"] == 2
++
++
++def test_urlvideo_loader_defaults_timeout_and_retries(tmp_path, monkeypatch):
++    require_requests()
++    import transparent_background.utils as utils_mod
++
++    recorded = {}
++
++    def fake_dl(url, suffix=None, timeout=None, retries=None):
++        recorded["timeout"] = timeout
++        recorded["retries"] = retries
++        temp_path = tmp_path / "temp.mp4"
++        temp_path.write_bytes(b"data")
++        return str(temp_path)
++
++    monkeypatch.setattr(utils_mod, "download_url_to_tempfile", fake_dl)
++
++    class FakeVideoLoader:
++        def __init__(self, path):
++            self.frames = [(b"frame", "video.mp4")]
++            self.size = 1
++            self.fps = 30
++            self.cap = _types.SimpleNamespace(get=lambda prop: 1)
++        def __iter__(self):
++            self.i = 0
++            return self
++        def __next__(self):
++            if self.i >= len(self.frames):
++                raise StopIteration
++            value = self.frames[self.i]
++            self.i += 1
++            return value
++        def __len__(self):
++            return self.size
++
++    monkeypatch.setattr(utils_mod, "VideoLoader", FakeVideoLoader)
++
++    list(utils_mod.URLVideoLoader("http://example.com/foo.mp4"))
++
++    assert recorded["timeout"] == pytest.approx(60.0)
++    assert recorded["retries"] == default_retries()
