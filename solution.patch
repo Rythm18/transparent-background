@@ -1,3 +1,16 @@
+diff --git a/README.md b/README.md
+index 3fd60f6..e9d93e5 100644
+--- a/README.md
++++ b/README.md
+@@ -239,6 +239,8 @@ $ transparent-background --source [SOURCE] --dest [DEST] --threshold [THRESHOLD]
+ * :star: `--format [FORMAT]` (optional): Specify output format. If not specified, the output format will be identical to the input format.
+ * :star: `--reverse` (optional): Reversing result. In other words, foreground will be removed instead of background. This will make our package's name `transparent-foreground`! :laughing:
+ * `--jit` (optional): Torchscript mode. If specified, it will trace model with pytorch built-in torchscript JIT compiler. May cause delay in initialization, but reduces inference time and gpu memory usage.
++* `--download-timeout [SECONDS]` (optional): Override the timeout used for remote HTTP/HTTPS downloads. Defaults to 30 seconds for images and 60 seconds for videos when omitted.
++* `--download-retries [COUNT]` (optional): Number of retry attempts for remote downloads (default: 3). Retries use exponential backoff between attempts.
+     
+ ### :crystal_ball: Python API
+ * Usage Example
 diff --git a/setup.py b/setup.py
 index bc3f61b..d84593f 100644
 --- a/setup.py
@@ -11,135 +24,166 @@ index bc3f61b..d84593f 100644
      extras_require={
          "webcam": ["pyvirtualcam>=0.6.0"],
 diff --git a/transparent_background/Remover.py b/transparent_background/Remover.py
-index 40f53e2..c3435da 100644
+index 40f53e2..554f247 100644
 --- a/transparent_background/Remover.py
 +++ b/transparent_background/Remover.py
-@@ -297,6 +297,22 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
+@@ -280,7 +280,7 @@ def to_base64(image):
+     base64_img = base64.b64encode(buffered.getvalue()).decode("utf-8")
+     return base64_img
+ 
+-def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resize, save_format=None, reverse=False, flet_progress=None, flet_page=None, preview=None, preview_out=None, options=None):
++def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resize, save_format=None, reverse=False, flet_progress=None, flet_page=None, preview=None, preview_out=None, options=None, download_timeout=None, download_retries=_DEFAULT_RETRIES):
+     warnings.filterwarnings("ignore")
+ 
+     remover = Remover(mode=mode, jit=jit, device=device, ckpt=ckpt, resize=resize)
+@@ -297,6 +297,11 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
          else:
              raise ImportError("pyvirtualcam not found. Install with \"pip install transparent-background[webcam]\"")
  
 +    elif is_url(source):
-+        # Remote input via HTTP/HTTPS
-+        # Determine format from URL or content-type
-+        ct = None
-+        try:
-+            import requests as _req
-+            h = _req.head(source, timeout=5)
-+            if 'content-type' in h.headers:
-+                ct = h.headers['content-type']
-+        except Exception:
-+            ct = None
-+        _format = get_format_from_url(source, ct)
-+        if _format == '':
-+            _format = 'Image'
 +        save_dir = os.getcwd()
-+
++        _format = get_format_from_url(source)
++        if _format == "":
++            _format = "Image"
      elif os.path.isdir(source):
          save_dir = os.path.join(os.getcwd(), source.split(os.sep)[-1])
          _format = get_format(os.listdir(source))
-@@ -317,7 +333,13 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
+@@ -317,7 +322,16 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
      if save_dir is not None:
          os.makedirs(save_dir, exist_ok=True)
  
 -    loader = eval(_format + "Loader")(source)
++    effective_retries = max(1, download_retries if download_retries is not None else _DEFAULT_RETRIES)
 +    if is_url(source):
-+        if _format == 'Video':
-+            loader = URLVideoLoader(source)
++        default_timeout = _DEFAULT_IMAGE_TIMEOUT if _format == "Image" else _DEFAULT_VIDEO_TIMEOUT
++        effective_timeout = download_timeout if download_timeout is not None else default_timeout
++        if _format == "Video":
++            loader = URLVideoLoader(source, timeout=effective_timeout, retries=effective_retries)
 +        else:
-+            loader = URLImageLoader(source)
++            loader = URLImageLoader(source, timeout=effective_timeout, retries=effective_retries)
 +    else:
 +        loader = eval(_format + "Loader")(source)
      frame_progress = tqdm.tqdm(
          total=len(loader),
          position=1 if (_format == "Video" and len(loader) > 1) else 0,
-@@ -367,7 +389,17 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
+@@ -367,7 +381,11 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
              writer.set(cv2.VIDEOWRITER_PROP_QUALITY, 100)
              frame_progress.refresh()
              frame_progress.reset()
 -            frame_progress.total = int(loader.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-+            total_frames = None
-+            try:
-+                cap_obj = loader.cap
-+            except AttributeError:
-+                cap_obj = None
++            cap_obj = getattr(loader, "cap", None)
 +            if cap_obj is not None:
-+                total_frames = cap_obj.get(cv2.CAP_PROP_FRAME_COUNT)
-+            if total_frames is not None and total_frames > 0:
-+                frame_progress.total = int(total_frames)
++                frame_progress.total = int(cap_obj.get(cv2.CAP_PROP_FRAME_COUNT))
 +            else:
 +                frame_progress.total = len(loader)
              if sample_progress is not None:
                  sample_progress.update()
  
+@@ -422,4 +440,18 @@ def entry_point(out_type, mode, device, ckpt, source, dest, jit, threshold, resi
+ 
+ def console():
+     args = parse_args()
+-    entry_point(args.type, args.mode, args.device, args.ckpt, args.source, args.dest, args.jit, args.threshold, args.resize, args.format, args.reverse)
++    entry_point(
++        args.type,
++        args.mode,
++        args.device,
++        args.ckpt,
++        args.source,
++        args.dest,
++        args.jit,
++        args.threshold,
++        args.resize,
++        args.format,
++        args.reverse,
++        download_timeout=args.download_timeout,
++        download_retries=args.download_retries,
++    )
 diff --git a/transparent_background/utils.py b/transparent_background/utils.py
-index 1cb3331..a04d4cd 100644
+index 1cb3331..2129cb7 100644
 --- a/transparent_background/utils.py
 +++ b/transparent_background/utils.py
-@@ -5,6 +5,10 @@ import yaml
+@@ -1,10 +1,17 @@
+ import os
+ import re
++import sys
+ import cv2
+ import yaml
  import torch
  import hashlib
  import argparse
++import logging
 +import mimetypes
 +import tempfile
++import time
 +from urllib.parse import urlparse
 +from io import BytesIO
  
  import albumentations as A
  from albumentations.core.transforms_interface import ImageOnlyTransform
-@@ -15,6 +19,11 @@ from PIL import Image
+@@ -15,9 +22,22 @@ from PIL import Image
  from threading import Thread
  from easydict import EasyDict
  
-+try:
-+    import requests  # optional, used for URL inputs
-+except Exception:  # pragma: no cover - requests added as dependency, but keep safe import
++try:  # pragma: no cover - optional dependency injected for remote downloads
++    import requests
++except Exception:  # pragma: no cover - ensure graceful degradation when requests missing
 +    requests = None
 +
  VID_EXTS = ('mp4', 'avi', 'h264', 'mkv', 'mov', 'flv', 'wmv', 'webm', 'ts', 'm4v', 'vob', '3gp', '3g2', 'rm', 'rmvb', 'ogv', 'ogg', 'drc', 'gif', 'gifv', 'mng', 'avi', 'mov', 'qt', 'wmv', 'yuv', 'rm', 'rmvb', 'asf', 'amv', 'mp4', 'm4p', 'm4v', 'mpg', 'mp2', 'mpeg', 'mpe', 'mpv', 'mpg', 'mpeg', 'm2v', 'm4v', 'svi', '3gp', '3g2', 'mxf', 'roq', 'nsv', 'flv', 'f4v', 'f4p', 'f4a', 'f4b')
  IMG_EXTS = ('jpg', 'jpeg', 'bmp', 'png', 'ppm', 'pgm', 'pbm', 'pnm', 'webp', 'sr', 'ras', 'tiff', 'tif', 'exr', 'hdr', 'pic', 'dib', 'jpe', 'jp2', 'j2k', 'jpf', 'jpx', 'jpm', 'mj2', 'jxr', 'hdp', 'wdp', 'cur', 'ico', 'ani', 'icns', 'bpg', 'jp2', 'j2k', 'jpf', 'jpx', 'jpm', 'mj2', 'jxr', 'hdp', 'wdp', 'cur', 'ico', 'ani', 'icns', 'bpg')
  
-@@ -259,3 +268,180 @@ class WebcamLoader:
++_DEFAULT_IMAGE_TIMEOUT = 30.0
++_DEFAULT_VIDEO_TIMEOUT = 60.0
++_DEFAULT_RETRIES = 3
++_BACKOFF_BASE = 0.5
++_BACKOFF_CAP = 4.0
++
++logger = logging.getLogger(__name__)
++
+ def parse_args():
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--source',    '-s',  type=str,                   help="Path to the source. Single image, video, directory of images, directory of videos is supported.")
+@@ -31,6 +51,8 @@ def parse_args():
+     parser.add_argument('--mode',      '-m',  type=str, default='base',   help="choose between base and fast mode. Also, use base-nightly for nightly release checkpoint.")
+     parser.add_argument('--ckpt',      '-c',  type=str, default=None,     help="Designate checkpoint. If not specified, it will download or load pre-downloaded default checkpoint.")
+     parser.add_argument('--threshold', '-th', type=str, default=None,     help="Designate threshold. If specified, it will output hard prediction above threshold. If not specified, it will output soft prediction.")
++    parser.add_argument('--download-timeout', type=float, default=None,   help="Timeout (seconds) for remote URL downloads. Defaults to 30s for images and 60s for videos.")
++    parser.add_argument('--download-retries', type=int, default=_DEFAULT_RETRIES, help="Retry attempts for remote downloads (default: 3).")
+     return parser.parse_args()
+ 
+ def get_backend():
+@@ -259,3 +281,211 @@ class WebcamLoader:
  
      def __len__(self):
          return 0
 +
++
 +# -------------- URL helpers and loaders --------------
 +
-+def is_url(s: str) -> bool:
-+    return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
++def is_url(value: str) -> bool:
++    return isinstance(value, str) and value.startswith(("http://", "https://"))
 +
 +
 +def get_format_from_url(url: str, content_type: str = None) -> str:
-+    """Infer media type from URL or content-type.
-+    Returns 'Image', 'Video', or '' if unknown.
-+    """
 +    try:
 +        path = urlparse(url).path
 +    except Exception:
 +        path = url
 +    lower = path.lower()
 +    if any(lower.endswith(f".{ext}") for ext in IMG_EXTS):
-+        return 'Image'
++        return "Image"
 +    if any(lower.endswith(f".{ext}") for ext in VID_EXTS):
-+        return 'Video'
++        return "Video"
 +    if content_type:
-+        if content_type.startswith('image/'):
-+            return 'Image'
-+        if content_type.startswith('video/'):
-+            return 'Video'
-+    return ''
-+
-+
-+def fetch_image_from_url(url: str, timeout: float = 30.0) -> Image.Image:
-+    assert requests is not None, "requests is required for URL input support"
-+    resp = requests.get(url, stream=True, timeout=timeout)
-+    resp.raise_for_status()
-+    img = Image.open(BytesIO(resp.content)).convert('RGB')
-+    return img
++        if content_type.startswith("image/"):
++            return "Image"
++        if content_type.startswith("video/"):
++            return "Video"
++    return ""
 +
 +
 +def _infer_suffix(url: str, content_type: str = None) -> str:
-+    # try url path
 +    try:
 +        path = urlparse(url).path
 +    except Exception:
@@ -147,51 +191,92 @@ index 1cb3331..a04d4cd 100644
 +    base, ext = os.path.splitext(path)
 +    if ext and len(ext) <= 5:
 +        return ext
-+    # try content type
 +    if content_type:
-+        guess = mimetypes.guess_extension(content_type.split(';')[0].strip())
++        guess = mimetypes.guess_extension(content_type.split(";")[0].strip())
 +        if guess:
 +            return guess
-+    return ''
++    return ""
 +
 +
-+def download_url_to_tempfile(url: str, suffix: str = None, timeout: float = 60.0) -> str:
-+    assert requests is not None, "requests is required for URL input support"
++def _call_with_retries(func, *, retries, backoff_base=_BACKOFF_BASE, timeout=None, **kwargs):
++    if requests is None:
++        raise RuntimeError("requests is required for remote input support")
++    attempts = max(1, retries)
++    last_exc = None
++    for attempt in range(1, attempts + 1):
++        try:
++            logger.debug("download attempt %d/%d", attempt, attempts)
++            return func(timeout=timeout, **kwargs)
++        except requests.RequestException as exc:
++            last_exc = exc
++            if attempt == attempts:
++                raise
++            sleep_for = min(_BACKOFF_CAP, backoff_base * (2 ** (attempt - 1)))
++            time.sleep(sleep_for)
++    raise last_exc  # pragma: no cover - loop always returns/raises
++
++
++def download_url_to_tempfile(url: str, suffix: str = None, timeout: float = _DEFAULT_VIDEO_TIMEOUT, retries: int = _DEFAULT_RETRIES) -> str:
++    assert requests is not None, "requests dependency missing"
++
 +    head_ct = None
 +    try:
-+        h = requests.head(url, timeout=min(10.0, timeout))
-+        if 'content-type' in h.headers:
-+            head_ct = h.headers['content-type']
-+    except Exception:
++        head_resp = requests.head(url, timeout=min(timeout, 10.0))
++        head_resp.raise_for_status()
++        head_ct = head_resp.headers.get("content-type")
++    except requests.RequestException:
 +        head_ct = None
++
 +    if suffix is None:
 +        suffix = _infer_suffix(url, head_ct)
-+    # ensure suffix begins with '.' if provided and not empty
 +    if suffix and not suffix.startswith('.'):
-+        suffix = '.' + suffix
-+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or None) as tf:
-+        temp_path = tf.name
-+    with requests.get(url, stream=True, timeout=timeout) as r:
-+        r.raise_for_status()
-+        with open(temp_path, 'wb') as f:
-+            for chunk in r.iter_content(chunk_size=8192):
-+                if chunk:
-+                    f.write(chunk)
-+    return temp_path
++        suffix = f".{suffix}"
++
++    temp_path = None
++    try:
++        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or None) as tf:
++            temp_path = tf.name
++
++        def _get(**kwargs):
++            return requests.get(url, stream=True, **kwargs)
++
++        with _call_with_retries(_get, retries=retries, timeout=timeout) as response:
++            response.raise_for_status()
++            with open(temp_path, 'wb') as out_f:
++                for chunk in response.iter_content(chunk_size=8192):
++                    if chunk:
++                        out_f.write(chunk)
++        return temp_path
++    except Exception:
++        if temp_path and os.path.exists(temp_path):
++            os.remove(temp_path)
++        raise
++
++
++def fetch_image_from_url(url: str, timeout: float = _DEFAULT_IMAGE_TIMEOUT, retries: int = _DEFAULT_RETRIES) -> Image.Image:
++    assert requests is not None, "requests dependency missing"
++
++    def _get(**kwargs):
++        return requests.get(url, stream=False, **kwargs)
++
++    response = _call_with_retries(_get, retries=retries, timeout=timeout)
++    response.raise_for_status()
++    return Image.open(BytesIO(response.content)).convert('RGB')
 +
 +
 +class URLImageLoader:
-+    def __init__(self, url: str):
++    def __init__(self, url: str, *, timeout: float = _DEFAULT_IMAGE_TIMEOUT, retries: int = _DEFAULT_RETRIES):
 +        self.url = url
-+        # Pre-fetch to raise errors early and to know name
-+        self.image = fetch_image_from_url(url)
++        self.timeout = timeout
++        self.retries = retries
++        self.image = fetch_image_from_url(url, timeout=timeout, retries=retries)
 +        try:
 +            path = urlparse(url).path
 +        except Exception:
 +            path = url
 +        name = os.path.basename(path)
-+        if name == '' or name is None:
-+            name = 'remote.jpg'
++        if not name:
++            name = "remote.jpg"
 +        self.name = name
 +        self.size = 1
 +
@@ -210,11 +295,12 @@ index 1cb3331..a04d4cd 100644
 +
 +
 +class URLVideoLoader:
-+    def __init__(self, url: str):
-+        # Download to a temp file and delegate
-+        temp_path = download_url_to_tempfile(url)
-+        self._temp_path = temp_path
-+        self._inner = VideoLoader(temp_path)
++    def __init__(self, url: str, *, timeout: float = _DEFAULT_VIDEO_TIMEOUT, retries: int = _DEFAULT_RETRIES):
++        self.url = url
++        self.timeout = timeout
++        self.retries = retries
++        self._temp_path = download_url_to_tempfile(url, timeout=timeout, retries=retries)
++        self._inner = VideoLoader(self._temp_path)
 +        self.size = len(self._inner)
 +        self._iter = None
 +        self._closed = False
@@ -259,10 +345,10 @@ index 1cb3331..a04d4cd 100644
 +        if self._closed:
 +            return
 +        self._closed = True
-+        inner_cap = getattr(self._inner, "cap", None)
-+        if inner_cap is not None:
++        cap_obj = getattr(self._inner, 'cap', None)
++        if cap_obj is not None:
 +            try:
-+                inner_cap.release()
++                cap_obj.release()
 +            except Exception:
 +                pass
 +        if self._temp_path and os.path.isfile(self._temp_path):
@@ -274,7 +360,7 @@ index 1cb3331..a04d4cd 100644
 +    def close(self):
 +        self._cleanup()
 +
-+    def __del__(self):
++    def __del__(self):  # pragma: no cover - best effort cleanup
 +        try:
 +            self._cleanup()
 +        except Exception:
