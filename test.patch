@@ -32,7 +32,7 @@ new file mode 100644
 index 0000000..095ec2f
 --- /dev/null
 +++ b/tests/new/test_download_retry.py
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,397 @@
 +import os
 +import sys
 +import types as _types
@@ -253,12 +253,21 @@ index 0000000..095ec2f
 +    sleeps.clear()
 +
 +    class AlwaysFail:
++        def __init__(self):
++            self.calls = 0
++
 +        def __call__(self, url, stream=True, timeout=None):
-+            raise req.ConnectionError("fail")
++            self.calls += 1
++            if self.calls == 1:
++                raise req.Timeout("first")
++            raise req.ConnectionError("second")
 +
 +    monkeypatch.setattr(req, "get", AlwaysFail())
-+    with pytest.raises(req.ConnectionError):
++
++    with pytest.raises(req.ConnectionError) as exc:
 +        fetch_fn("http://example.com/fail.png", retries=2)
++    assert "second" in str(exc.value)
++    assert sleeps and sleeps[0] == 0.5
 +
 +
 +def test_entry_point_image_passes_download_options(tmp_path, monkeypatch):
@@ -421,4 +430,3 @@ index 0000000..095ec2f
 +    assert captured["url"] == url
 +    assert captured["timeout"] == pytest.approx(60.0)
 +    assert captured["retries"] == default_retries()
-+EOF
